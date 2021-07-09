@@ -8,7 +8,6 @@ import types
 import sys
 import os
 from os import path
-import math
 import glob
 import shlex
 import re
@@ -43,7 +42,7 @@ def to_python_type(token):
         return False
 
     # fractions
-    fraction_re = re.match("(\d+)\s*?/\s*?(\d+)", token.lower())
+    fraction_re = re.match(r"(\d+)\s*?/\s*?(\d+)", token.lower())
     if fraction_re:
         frac = fraction_re.groups()
         return float(frac[0]) / float(frac[1])
@@ -70,11 +69,11 @@ loglevel = "error"
 ##+++++++++++++++++++++++++##
 
 if len(sys.argv) < 3:
-  print(f"""FFmpeg CRT transform script / VileR 2021
+    print(f"""FFmpeg CRT transform script / VileR 2021
        USAGE: {sys.argv[0]} <config_file> <input_file> [output_file]
    input_file must be a valid image or video.  If output_file is omitted, the
    output will be named "(input_file)_(config_file).(input_ext)""")
-  sys.exit(0)
+    sys.exit(0)
 
 config_file = sys.argv[1]
 input_file = sys.argv[2]
@@ -84,11 +83,11 @@ output_file = sys.argv[3] if len(sys.argv) > 3 else \
                       path.splitext(sys.argv[1])[1])
 
 if not path.exists(input_file):
-    print(f"Input file not found: {input_file} ", file=sys.stderr);
+    print(f"Input file not found: {input_file} ", file=sys.stderr)
     sys.exit(1)
 
 if not path.exists(config_file):
-    print(f"Config file not found: {config_file}", file=sys.stderr);
+    print(f"Config file not found: {config_file}", file=sys.stderr)
     sys.exit(1)
 
 if len(path.splitext(output_file)) < 2:
@@ -128,7 +127,7 @@ params = types.SimpleNamespace()
 with open(config_file, "rb") as fp:
     for line in fp:
         line = str(line, encoding="UTF-8").strip()
-        result = re.findall('^([^;][^\s]+)\s+([^\s]+)', line)
+        result = re.findall(r'^([^;][^\s]+)\s+([^\s]+)', line)
         if result:
             key, value = result[0]
             key = key if key[0].isalpha() else  "_" + key
@@ -283,7 +282,7 @@ if params.monitor_color == "p7":
         params.mono_str2 = f"""split=4 [orig][a][b][c];
                 [a] tmix={params.latency}, {params.monocurves_lat} [lat];
                 [b] lagfun={params.p_decay_factor} [dec1]; [c] lagfun={params.p_decay_factor}*0.95 [dec2];
-                [dec2][dec1] blend=all_mode='lighten':all_opacity=0.3, {params.monocurves_dec}, setpts=PTS+(params.{decaydelay}/FR)/TB [decay];
+                [dec2][dec1] blend=all_mode='lighten':all_opacity=0.3, {params.monocurves_dec}, setpts=PTS+({params.decaydelay}/FR)/TB [decay];
                 [lat][decay] blend=all_mode='lighten':all_opacity={params.p_decay_alpha} [p7];
                 [orig][p7] blend=all_mode='screen',format={rgbfmt},"""
     else:
@@ -311,19 +310,19 @@ if params.corner_radius == 0:
         -f lavfi -i "color=c=#ffffff:s={params.px}x{params.py}, format=rgb24 {params.bzlensc}"
         -frames:v 1 TMPbezel.png''')
 else:
-        run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y
-        -f lavfi -i "color=s=1024x1024, format=gray, geq='lum=if(lte((X-W)^2+(Y-H)^2, 1024*1024), 255, 0)', scale={params.corner_radius}:{params.corner_radius}:flags=lanczos"
-        -filter_complex "
-                color=c=#ffffff:s={params.px}x{params.py}, format=rgb24[bg];
-                [0] split=4 [tl][c2][c3][c4];
-                [c2] transpose=1 [tr];
-                [c3] transpose=3 [br];
-                [c4] transpose=2 [bl];
-                [bg][tl] overlay=0:0:format=rgb [p1];
-                [p1][tr] overlay={params.px}-{params.corner_radius}:0:format=rgb [p2];
-                [p2][br] overlay={params.px}-{params.corner_radius}:{params.py}-{params.corner_radius}:format=rgb [p3];
-                [p3][bl] overlay=x=0:y={params.py}-{params.corner_radius}:format=rgb {params.bzlensc}"
-       -frames:v 1 TMPbezel.png''')
+    run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y
+    -f lavfi -i "color=s=1024x1024, format=gray, geq='lum=if(lte((X-W)^2+(Y-H)^2, 1024*1024), 255, 0)', scale={params.corner_radius}:{params.corner_radius}:flags=lanczos"
+    -filter_complex "
+            color=c=#ffffff:s={params.px}x{params.py}, format=rgb24[bg];
+            [0] split=4 [tl][c2][c3][c4];
+            [c2] transpose=1 [tr];
+            [c3] transpose=3 [br];
+            [c4] transpose=2 [bl];
+            [bg][tl] overlay=0:0:format=rgb [p1];
+            [p1][tr] overlay={params.px}-{params.corner_radius}:0:format=rgb [p2];
+            [p2][br] overlay={params.px}-{params.corner_radius}:{params.py}-{params.corner_radius}:format=rgb [p3];
+            [p3][bl] overlay=x=0:y={params.py}-{params.corner_radius}:format=rgb {params.bzlensc}"
+    -frames:v 1 TMPbezel.png''')
 
 ##+++++++++++++++++++++++++++++++++##
 ## Create scanlines, add curvature ##
