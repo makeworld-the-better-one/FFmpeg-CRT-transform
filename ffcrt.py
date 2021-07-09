@@ -55,7 +55,7 @@ def to_python_type(token):
 
 def try_remove(filename):
     try:
-        os.unlink(filename)
+        os.remove(filename)
     except FileNotFoundError:
         pass
 
@@ -609,18 +609,8 @@ run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y -i TMPstep03.
 ## Clean up ##
 ##++++++++++##
 
-try_remove("TMPbezel.png")
-for scanline in glob.glob("TMPscanline.*"):
-    try_remove(scanline)
-try_remove("TMPscanlines.png")
-for shadow_file in glob.glob("TMPshadow*.png"):
-    try_remove(shadow_file)
-try_remove("TMPtexture.png")
-try_remove("TMPgrid.png")
-for step_file in glob.glob("TMPstep0*"):
-    try_remove(step_file)
-for bloom_file in glob.glob("TMPbloom.*"):
-    try_remove(bloom_file)
+for file in glob.glob("TMP*"):
+    try_remove(file)
 
 ffduration = datetime.now() - ffstart
 
