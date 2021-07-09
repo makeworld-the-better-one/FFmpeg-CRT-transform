@@ -103,7 +103,7 @@ ix = None
 iy = None
 fc = None
 
-result = run_command_get_params(f"ffprobe -hide_banner -loglevel quiet -select_streams v:0 -show_entries stream=width,height,nb_frames {input_file}", "width", "height", "nb_frames")
+result = run_command_get_params(f"ffprobe -hide_banner -loglevel quiet -select_streams v:0 -show_entries stream=width,height,nb_frames '{input_file}'", "width", "height", "nb_frames")
 
 ix = int(result["width"])
 iy = int(result["height"])
@@ -454,8 +454,7 @@ if is_video and params.latency > 0 and params.monitor_color != "p7":
     params.preprocess = True
     if params.vf_pre:
         params.vf_pre = f", {params.vf_pre}"
-
-        params.vf_pre = f"""split [o][2lat];
+    params.vf_pre = f"""split [o][2lat];
                 [2lat] tmix={params.latency}, setpts=PTS+(({params.latency}/2)/FR)/TB [lat];
                 [lat][o] blend=all_opacity={params.latency_alpha}
                 {params.vf_pre}"""
@@ -471,7 +470,7 @@ if is_video and params.p_decay_factor > 0 and params.monitor_color != "p7":
 
 if params.preprocess:
     print("Step00 (preprocess)")
-    run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y -i {input_file} -filter_complex "{params.vf_pre}" {tmp_outparams} TMPstep00.{tmp_ext}''')
+    run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y -i '{input_file}' -filter_complex "{params.vf_pre}" {tmp_outparams} TMPstep00.{tmp_ext}''')
 
     params.scalesrc = f"TMPstep00.{tmp_ext}"
 
