@@ -15,6 +15,7 @@ import subprocess
 from datetime import datetime
 
 def run_command(command):
+    print(command)
     try:
         process = subprocess.run(shlex.split(command, posix=(os.name == "posix")),
                                  capture_output=True,
@@ -94,6 +95,11 @@ if len(path.splitext(output_file)) < 2:
     print("Output filename must have an extension: {output_file}", file=sys.stderr)
     sys.exit(1)
 
+# For use in shell commands
+og_input_file = input_file
+input_file = shlex.quote(input_file)
+output_file = shlex.quote(output_file)
+
 ##++++++++++++++++++++++++++++++++++++++++++++++##
 ## Find input dimensions and type (image/video) ##
 ##++++++++++++++++++++++++++++++++++++++++++++++##
@@ -102,18 +108,18 @@ ix = None
 iy = None
 fc = None
 
-result = run_command_get_params(f"ffprobe -hide_banner -loglevel quiet -select_streams v:0 -show_entries stream=width,height,nb_frames '{input_file}'", "width", "height", "nb_frames")
+result = run_command_get_params(f"ffprobe -hide_banner -loglevel quiet -select_streams v:0 -show_entries stream=width,height,nb_frames {input_file}", "width", "height", "nb_frames")
 
 ix = int(result["width"])
 iy = int(result["height"])
 fc = result["nb_frames"]
 
 if None in (ix, iy, fc):
-    print(f"Couldn't get media info for input file '{input_file}' (invalid image/video?)", file=sys.stderr)
+    print(f"Couldn't get media info for input file {input_file} (invalid image/video?)", file=sys.stderr)
     sys.exit(1)
 
 # Matroska and webm doesn't return nb_frames; assume video
-if path.splitext(input_file)[1] in (".mkv", ".webm"):
+if path.splitext(og_input_file)[1] in (".mkv", ".webm"):
     fc = "unknown"
 
 is_video = fc != "N/A"
@@ -140,10 +146,10 @@ if not os.path.exists(overlay_file):
 ## Set temporary + final output parameters
 if is_video:
     if params.oformat == 0:
-        fin_outparams = "-pix_fmt rgb24 -c:a copy -c:v libx264rgb -crf 8"
+        fin_outparams = "-map '[finalout]' -map '0:a?' -pix_fmt rgb24 -c:v libx264rgb -crf 8"
         fin_matrixstr = ""
     elif params.oformat == 1:
-        fin_outparams = "-pix_fmt yuv444p10le -color_primaries 1 -color_trc 1 -colorspace 1 -color_range 2 -c:v libx264 -crf 8 -c:a copy"
+        fin_outparams = "-map '[finalout]' -map '0:a?' -pix_fmt yuv444p10le -color_primaries 1 -color_trc 1 -colorspace 1 -color_range 2 -c:v libx264 -crf 8"
         fin_matrixstr = ", scale=iw:ih:flags=neighbor+full_chroma_inp:in_range=full:out_range=full:out_color_matrix=bt709"
 
     if params._16bpc_processing:
@@ -155,9 +161,9 @@ if is_video:
 else:
     fin_matrixstr = ""
     if params.oformat == 0:
-        fin_outparams = "-frames:v 1 -pix_fmt rgb24"
+        fin_outparams = "-map '[finalout]' -frames:v 1 -pix_fmt rgb24"
     elif params.oformat == 1:
-        fin_outparams = "-frames:v 1 -pix_fmt rgb48be"
+        fin_outparams = "-map '[finalout]' -frames:v 1 -pix_fmt rgb48be"
 
     if params._16bpc_processing:
         tmp_ext = "mkv"
@@ -437,6 +443,7 @@ if params.flat_panel:
 
 ##++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
 ## Pre-process if needed: phosphor decay (video only), invert, pixel latency (video only) ##
+## Step 0                                                                                 ##
 ##++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
 
 params.scalesrc = input_file
@@ -444,6 +451,10 @@ params.preprocess = False
 params.vf_invert = False
 params.vf_decay = False
 params.vf_pre = ""
+
+# All ffmpeg input media
+# Step 0 just needs the input file, other steps will add more
+params.inputs = f"-i {input_file}"
 
 if params.invert_input:
     params.preprocess = True
@@ -454,8 +465,8 @@ if is_video and params.latency > 0 and params.monitor_color != "p7":
     if params.vf_pre:
         params.vf_pre = f", {params.vf_pre}"
     params.vf_pre = f"""split [o][2lat];
-                [2lat] tmix={params.latency}, setpts=PTS+(({params.latency}/2)/FR)/TB [lat];
-                [lat][o] blend=all_opacity={params.latency_alpha}
+                [2lat] tmix={params.latency}, setpts=PTS+(({params.latency}/2)/FR)/TB [lat2];
+                [lat2][o] blend=all_opacity={params.latency_alpha}
                 {params.vf_pre}"""
 
 if is_video and params.p_decay_factor > 0 and params.monitor_color != "p7":
@@ -467,97 +478,107 @@ if is_video and params.p_decay_factor > 0 and params.monitor_color != "p7":
             [orig][lag] blend=all_mode='lighten':all_opacity={params.p_decay_alpha}
             {params.vf_pre}"""
 
-if params.preprocess:
-    print("Step00 (preprocess)")
-    run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y -i '{input_file}' -filter_complex "{params.vf_pre}" {tmp_outparams} TMPstep00.{tmp_ext}''')
+# The full filter used for the final (and only) ffmpeg call
+params.final_filter_complex = ""
 
-    params.scalesrc = f"TMPstep00.{tmp_ext}"
+if params.preprocess:
+    params.final_filter_complex = params.vf_pre + "[vf_pre_out];[vf_pre_out]"
 
 ##++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
 ## Scale nearest neighbor, go 16bit/channel, apply grid, gamma & pixel blur ##
+## Step 1                                                                   ##
 ##++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
 
 # If we have a grid, the inputs + first part of filter are different
 params.gridblendmode = "screen" if params.pxgrid_invert else 'multiply'
 params.gridfilterfrag = f"[scaled]; movie=TMPgrid.png[grid]; [scaled][grid]blend=all_mode={params.gridblendmode}" if params.flat_panel else ""
 
-print("Step01")
-run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y -i {params.scalesrc} -filter_complex "
-        scale=iw*{params.prescale_by}:ih:flags=neighbor,
-        format=gbrp16le,
-        lutrgb='r=gammaval(2.2):g=gammaval(2.2):b=gammaval(2.2)',
-        scale=iw*{params.px_aspect}:ih:flags=fast_bilinear,
-        scale=iw:ih*{params.prescale_by}:flags=neighbor
-        {params.gridfilterfrag},
-        gblur=sigma={params.h_px_blur}/100*{params.prescale_by}*{params.px_aspect}:sigmaV={params.vsigma}:steps=3"
--c:v ffv1 -c:a copy TMPstep01.mkv''')
+params.final_filter_complex += f'''
+    scale=iw*{params.prescale_by}:ih:flags=neighbor,
+    format=gbrp16le,
+    lutrgb='r=gammaval(2.2):g=gammaval(2.2):b=gammaval(2.2)',
+    scale=iw*{params.px_aspect}:ih:flags=fast_bilinear,
+    scale=iw:ih*{params.prescale_by}:flags=neighbor
+    {params.gridfilterfrag},
+    gblur=sigma={params.h_px_blur}/100*{params.prescale_by}*{params.px_aspect}:sigmaV={params.vsigma}:steps=3
+    '''
+params.final_filter_complex += "[step1out];[step1out]"
 
 ##+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
 ## Add halation, revert gamma, normalize blackpoint, revert bit depth, add curvature ##
+## Step 2                                                                            ##
 ##+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
 
 # (Real halation should come after scanlines & before shadowmask, but that turned out ugly)
 
-print("Step02")
 if params.halation_on:
-    run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y -i TMPstep01.mkv -filter_complex "
-                [0]split[a][b],
-                [a]gblur=sigma={params.halation_radius}:steps=6[h],
-                [b][h]blend=all_mode='lighten':all_opacity={params.halation_alpha},
-                lutrgb='r=clip(gammaval(0.454545)*(258/256)-2*256 ,minval,maxval):
-                        g=clip(gammaval(0.454545)*(258/256)-2*256 ,minval,maxval):
-                        b=clip(gammaval(0.454545)*(258/256)-2*256 ,minval,maxval)',
-                lutrgb='r=val+({params.blackpoint}*256*(maxval-val)/maxval):g=val+({params.blackpoint}*256*(maxval-val)/maxval):b=val+({params.blackpoint}*256*(maxval-val)/maxval)',
-                format={rgbfmt}
-                {params.lensc}"
-        {tmp_outparams} TMPstep02.{tmp_ext}''')
-
+    params.final_filter_complex += f'''
+        split[a2][b2],
+        [a2]gblur=sigma={params.halation_radius}:steps=6[h],
+        [b2][h]blend=all_mode='lighten':all_opacity={params.halation_alpha},
+        lutrgb='r=clip(gammaval(0.454545)*(258/256)-2*256 ,minval,maxval):
+                g=clip(gammaval(0.454545)*(258/256)-2*256 ,minval,maxval):
+                b=clip(gammaval(0.454545)*(258/256)-2*256 ,minval,maxval)',
+        lutrgb='r=val+({params.blackpoint}*256*(maxval-val)/maxval):g=val+({params.blackpoint}*256*(maxval-val)/maxval):b=val+({params.blackpoint}*256*(maxval-val)/maxval)',
+        format={rgbfmt}
+        {params.lensc}
+        '''
 else:
-    run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y -i TMPstep01.mkv -vf "
-                lutrgb='r=gammaval(0.454545):g=gammaval(0.454545):b=gammaval(0.454545)',
-                lutrgb='r=val+({params.blackpoint}*256*(maxval-val)/maxval):g=val+({params.blackpoint}*256*(maxval-val)/maxval):b=val+({params.blackpoint}*256*(maxval-val)/maxval)',
-                format={rgbfmt}
-                {params.lensc}"
-       {tmp_outparams} TMPstep02.{tmp_ext}''')
+    params.final_filter_complex += f'''
+        lutrgb='r=gammaval(0.454545):g=gammaval(0.454545):b=gammaval(0.454545)',
+        lutrgb='r=val+({params.blackpoint}*256*(maxval-val)/maxval):g=val+({params.blackpoint}*256*(maxval-val)/maxval):b=val+({params.blackpoint}*256*(maxval-val)/maxval)',
+        format={rgbfmt}
+        {params.lensc}
+        '''
+
+# Two outputs because there are potentially two users of this
+# https://stackoverflow.com/q/34338673/
+params.final_filter_complex += ", split[step2out1][step2out2];"
 
 ##++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
 ## Add bloom, scanlines, shadowmask, rounded corners + brightness fix ##
+## Step 2 bloom (optional)                                            ##
+## Step 3                                                             ##
 ##++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
 
 if params.bezel_curvature != params.crt_curvature or params.corner_radius != 0 or not params.skip_ovl or not params.skip_bri:
     if params.scanlines_on:
-        params.sl_input = f"TMPscanlines.{tmp_ext}"
-        if params.bloom_on:
-            params.sl_input = f"TMPbloom.{tmp_ext}"
-            print("Step02-bloom")
-            run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y
-                -i TMPscanlines.{tmp_ext} -i TMPstep02.{tmp_ext} -filter_complex "
-                      [1]lutrgb='r=gammaval(2.2):g=gammaval(2.2):b=gammaval(2.2)', hue=s=0, lutrgb='r=gammaval(0.454545):g=gammaval(0.454545):b=gammaval(0.454545)'[g],
-                   [g][0]blend=all_expr='if(gte(A,{rng}/2), (B+({rng}-1-B)*{params.bloom_power}*(A-{rng}/2)/({rng}/2)), B)',
-                   setsar=sar=1/1"
-                 {tmp_outparams} {params.sl_input}''')
 
-        print("Step03")
-        run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y
-        -i TMPstep02.{tmp_ext} -i {params.sl_input} -i TMPshadowmask.png -i TMPbezel.png -filter_complex "
-                [0][1]blend=all_mode='multiply':all_opacity={params.sl_alpha}[a],
-                [a][2]blend=all_mode='multiply':all_opacity={params.ovl_alpha}[b],
-                [b][3]blend=all_mode='multiply',
-                lutrgb='r=clip(val*{params.brighten},0,{rng}-1):g=clip(val*{params.brighten},0,{rng}-1):b=clip(val*{params.brighten},0,{rng}-1)'"
-    {tmp_outparams} TMPstep03.{tmp_ext}''')
+        # Addressed as [1] because it's the second input
+        params.inputs += f" -i TMPscanlines.{tmp_ext}"
+        # Scanline input address
+        params.sl_input = "1"
+
+        if params.bloom_on:
+            params.final_filter_complex += f'''
+                [step2out1]lutrgb='r=gammaval(2.2):g=gammaval(2.2):b=gammaval(2.2)', hue=s=0, lutrgb='r=gammaval(0.454545):g=gammaval(0.454545):b=gammaval(0.454545)'[g],
+                [g][1]blend=all_expr='if(gte(A,{rng}/2), (B+({rng}-1-B)*{params.bloom_power}*(A-{rng}/2)/({rng}/2)), B)',
+                setsar=sar=1/1
+                '''
+            params.final_filter_complex += "[step2bloomout];"
+            params.sl_input = "step2bloomout"
+
+        # Addressed as [2] and [3]
+        params.inputs += " -i TMPshadowmask.png -i TMPbezel.png"
+        params.final_filter_complex += f'''
+            [step2out2][{params.sl_input}]blend=all_mode='multiply':all_opacity={params.sl_alpha}[a3],
+            [a3][2]blend=all_mode='multiply':all_opacity={params.ovl_alpha}[b3],
+            [b3][3]blend=all_mode='multiply',
+            lutrgb='r=clip(val*{params.brighten},0,{rng}-1):g=clip(val*{params.brighten},0,{rng}-1):b=clip(val*{params.brighten},0,{rng}-1)'
+            '''
 
     else:
-        print("Step03")
-        run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y
-        -i TMPstep02.{tmp_ext} -i TMPshadowmask.png -i TMPbezel.png -filter_complex "
-                [0][1]blend=all_mode='multiply':all_opacity={params.ovl_alpha}[b],
-                [b][2]blend=all_mode='multiply',
-                lutrgb='r=clip(val*{params.brighten},0,{rng}-1):g=clip(val*{params.brighten},0,{rng}-1):b=clip(val*{params.brighten},0,{rng}-1)'"
-        {tmp_outparams} TMPstep03.{tmp_ext}''')
+        # Addressed as [1] and [2]
+        params.inputs += " -i TMPshadowmask.png -i TMPbezel.png"
+        params.final_filter_complex += f'''
+            [step2out1][1]blend=all_mode='multiply':all_opacity={params.ovl_alpha}[b3],
+            [b3][2]blend=all_mode='multiply',
+            lutrgb='r=clip(val*{params.brighten},0,{rng}-1):g=clip(val*{params.brighten},0,{rng}-1):b=clip(val*{params.brighten},0,{rng}-1)'
+            '''
 
-# Can be skipped if none of the above are needed
-else:
-    os.rename(f"TMPstep02.{tmp_ext}", f"TMPstep03.{tmp_ext}")
+params.final_filter_complex += "[step3out];"
+
+
 
 ##++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
 ## Detect crop area; crop, rescale, monochrome (if set), vignette, pad, set sar/dar ##
@@ -573,6 +594,8 @@ print()
 print(crop_output)
 print()
 
+# TODO: copy from bat, make cropping work
+
 params.crop_str = ""
 
 if params.texture_ovl == "paper":
@@ -586,23 +609,33 @@ elif params.texture_ovl == "lcdgrain":
 else:
     params.texture_str = ""
 
-print("Output")
-run_command(f'''ffmpeg -hide_banner -loglevel {loglevel} -stats -y -i TMPstep03.{tmp_ext} -filter_complex "
-        crop={params.crop_str},
-        format=gbrp16le,
-        lutrgb='r=gammaval(2.2):g=gammaval(2.2):b=gammaval(2.2)',
-        {params.mono_str1}
-        scale=w={params.ox}-{params.omargin}*2:h={params.oy}-{params.omargin}*2:force_original_aspect_ratio=decrease:flags={params.ofilter}+{params.swsflags},
-        lutrgb='r=gammaval(0.454545):g=gammaval(0.454545):b=gammaval(0.454545)',
-        format=gbrp16le,
-        format={rgbfmt},
-        {params.mono_str2}
-        setsar=sar=1/1
-        {params.vignette_str}
-        pad={params.ox}:{params.oy}:-1:-1:black
-        {params.texture_str}
-        {fin_matrixstr}"
-{fin_outparams} {output_file}''')
+# TODO: Re-add "crop={params.crop_str}," without quotes to the start once cropping is fixed
+params.final_filter_complex += f'''
+    [step3out]
+    format=gbrp16le,
+    lutrgb='r=gammaval(2.2):g=gammaval(2.2):b=gammaval(2.2)',
+    {params.mono_str1}
+    scale=w={params.ox}-{params.omargin}*2:h={params.oy}-{params.omargin}*2:force_original_aspect_ratio=decrease:flags={params.ofilter}+{params.swsflags},
+    lutrgb='r=gammaval(0.454545):g=gammaval(0.454545):b=gammaval(0.454545)',
+    format=gbrp16le,
+    format={rgbfmt},
+    {params.mono_str2}
+    setsar=sar=1/1
+    {params.vignette_str}
+    pad={params.ox}:{params.oy}:-1:-1:black
+    {params.texture_str}
+    {fin_matrixstr}
+    [finalout]
+    '''
+
+# FINAL OUTPUT
+
+run_command(f'''
+    ffmpeg -hide_banner -loglevel {loglevel} -stats -y {params.inputs}
+    -filter_complex "{params.final_filter_complex}"
+    {fin_outparams} {output_file}
+    '''
+)
 
 ##++++++++++##
 ## Clean up ##
